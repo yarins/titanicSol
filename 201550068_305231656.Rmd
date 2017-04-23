@@ -1,0 +1,336 @@
+---
+title: "201550068_305231565"
+output: html_document
+---
+
+
+## Libraries
+
+We chose to utilize dplyr package for data.frame manipulation, since we are accustomed to work with it in other projects and find it very easy and useful. Stringr helped us for a text mining feature extraction in the following sections. Caret was useful for the model building phase as well as rpart,c50 and caretEnsemble, which incoorporated the two models into an ensembled model. 
+
+```{r }
+library(dplyr)
+library(stringr)
+library(caret)
+library(rpart)
+library(C50)
+library(caretEnsemble)
+```
+
+## Reading the train and test CSVs
+
+
+
+```{r }
+
+trn <- read.csv("Titanic/train.csv",na.strings = "")
+tst<- read.csv("Titanic/test.csv",na.strings = "")
+
+```
+
+## Data preparation
+
+We'll start with isolating the PassangerId, Survived attributes for later use.
+In addition we set Survived as a factor.
+
+
+```{r }
+
+ids<- tst$PassengerId
+trn_survived <- factor(trn$Survived)
+trn <- trn[,-2]
+
+```
+
+
+In order to make consistent changes and manipulations to both train and test datasets, we'll create a relevant attributes which will diffrenciate between them and then combine them into a new full dataset.
+
+```{r }
+
+trn$partition <- "train"
+tst$partition <- "test"
+
+full <- rbind(trn,tst)
+
+summary(full)
+```
+
+
+Pclass attribute should be a factor as well. PassengerId and Ticket are not used for our analysis so we remove them.
+
+
+```{r }
+
+full$Pclass<- as.factor(full$Pclass)
+
+full <- full %>% select(-PassengerId,-Ticket)
+
+summary(full)
+```
+
+## Feature extraction
+
+By observing the Name attribute we can see that for different names exist different titles. Since we assume the status of a person is dependent on his\ her title, we chose to extract those title in order to create a new attribute.
+
+```{r }
+
+full$title <- str_sub(full$Name, str_locate(full$Name, ",")[ , 1] + 2, str_locate(full$Name, "\\.")[ , 1] - 1)
+
+
+male_noble_names <- c(  "Don", "Jonkheer", "Sir")
+full$title[full$title %in% male_noble_names] <- "male_royalty"
+female_noble_names <- c("Lady","Dona","the Countess")
+full$title[full$title %in% female_noble_names] <- "female_royalty"
+officer_names <- c("Capt","Col","Major","Dr","Rev")
+full$title[full$title %in% officer_names] <- "officer"
+female_Mrs_names <- c("Mme","Ms")
+full$title[full$title %in% female_Mrs_names] <- "Mrs"
+female_Miss_names <- c("Mlle")
+full$title[full$title %in% female_Miss_names] <- "Miss"
+full$title<- as.factor(full$title)
+
+summary(full)
+```
+
+
+
+By observing our dataset we can see that the Age attribute suffers from NA's. We chose to fill the gaps by calculating the mean age, grouped by the following attributes: Sex,Pclass,title,partition.
+
+```{r }
+
+full <- full %>%
+  group_by(Sex,Pclass,title,partition) %>%
+  mutate(mean_age = mean(Age,na.rm=TRUE) ,Age = ifelse(is.na(Age),mean_age,Age)) %>% ungroup()
+
+
+full <- full %>% select(-Name,-mean_age)
+
+summary(full)
+
+```
+
+
+
+The same is done for the Fare attributes when dealing with NA's, altough grouping by: Cabin, partition.
+
+```{r }
+
+full <- full %>% group_by(Cabin,partition) %>% mutate(Fare = ifelse(is.na(Fare),mean(Fare,na.rm=TRUE),Fare)) %>% ungroup()
+
+
+summary(full)
+```
+
+Since only two values of the Embarked attribue are NA's we filled them with 'S', which is the most frequent.
+
+```{r }
+
+full <- full %>% mutate(Embarked = ifelse(is.na(Embarked),'S',Embarked))
+full <- full %>% mutate(Embarked = ifelse(Embarked=="S","3",Embarked))
+full$Embarked <- as.factor(as.character(full$Embarked))
+
+summary(full)
+```
+
+
+
+Since so many values of the Cabin feature are NA's, and in addition we believe it to be inconsistent, we simply set the NA's as a new category 'U'. In order to understand our argument that the Cabin is inconsistent, we simply notice that several passengers have more than a single cabin. Perhaps this indicates only the passenger who aquiered the tickets was assingned with the cabins.  
+
+```{r }
+
+full <- full %>% mutate(Cabin = ifelse(is.na(Cabin),'U',Cabin))
+
+full$Cabin<- as.factor(as.character(full$Cabin))
+
+summary(full)
+
+```
+
+
+By observing the SibSp and Parch attribute we realized that we can calculate the family size for our passengers.
+We also thought it might benefit us to group the family sizes into singles,regular sized and big families. 
+
+```{r }
+
+full$FamilySize <- full$SibSp + full$Parch + 1
+
+full <- full %>% 
+  ungroup() %>%
+  mutate(FamilyType = ifelse(FamilySize==1,"alone",
+                             ifelse(FamilySize>=2 & FamilySize<=4,"reg","big")))
+
+full$FamilyType<- as.factor(full$FamilyType)
+full$FamilySize<- as.factor(full$FamilySize)
+
+summary(full)
+```
+
+## Preparing for our prediction process
+
+First of all we go back into tow separate datasets.
+
+```{r }
+
+trn <- full %>% filter(partition=="train") %>% select(-partition)
+tst <- full %>% filter(partition=="test") %>% select(-partition)
+trn$Survived <- trn_survived
+
+```
+
+## Model training
+
+our trn dataset will we devided into its own train\ test partition 
+
+```{r }
+
+indices <- sample(1:nrow(trn),nrow(trn)*0.75)
+train<- trn[indices,]
+test<- trn[-indices,]
+
+```
+
+## C50 model
+
+A descision tree model based on entropy similair to the c4.5 we learned throught our studies.
+
+We used the following attributes: Sex + Pclass + Fare + title + Embarked.
+They recieved the higest accuracy rate. Sadly the family size attribute proved useless in our case. 
+
+```{r }
+
+set.seed(123)
+C50 <-C5.0(Survived ~ Sex + Pclass + Fare + title + Embarked, data=train )
+pred <- predict(C50,test)
+
+```
+
+
+observe a confusion matrix
+
+```{r }
+
+table(pred,test$Survived)
+
+```
+
+Calculate the mean accuracy
+
+```{r }
+
+mean(pred==test$Survived)
+```
+
+## Prediction using our trained model
+
+Here we created the csv for kaggle, which gave us an overall accuracy of 0.77033
+
+```{r }
+
+my_prediction2 <- predict(C50, tst)
+my_solution2 <- data.frame(PassengerId = ids,  Survived = my_prediction2)
+
+write.csv(my_solution2,file="Titanic/try6.csv",row.names = F)
+
+```
+
+## rpart model
+
+A descision tree model based on recursive partitioning which gave us better results.
+
+We used the following attributes: Sex + Pclass + Fare + title + Age + Embarked + Cabin.
+They recieved the higest accuracy rate. Sadly the family size attribute proved useless in our case. 
+
+```{r }
+
+rpart  <- train(Survived ~ Sex + Pclass + Fare + title + Age + Embarked + Cabin , data= train, method= "rpart")
+pred2 <- predict(rpart , train)
+
+```
+
+A confusion matrix and accuracy
+
+```{r }
+
+confMat <- confusionMatrix(pred2, train$Survived)
+confMat$overall["Accuracy"]
+confMat
+
+```
+
+## Prediction using our trained model, we got a score of 0.78947 :) :D :p 
+
+
+```{r }
+
+my_prediction <- predict(rpart, tst)
+my_solution <- data.frame(PassengerId = ids,  Survived = my_prediction)
+
+write.csv(my_solution,file="Titanic/try4.csv",row.names = F)
+
+```
+
+
+## Ensembeling
+
+We'll use the following attributes: Sex + Pclass + Fare + title + Age + Embarked
+And our two models
+
+```{r }
+
+trainControl <- trainControl(method="repeatedcv", number=10, repeats=3)
+
+model_list <- caretList(
+  Survived ~ Sex + Pclass + Fare + title + Age + Embarked , data=train,
+  trControl=trainControl,
+  methodList=c("C5.0", "rpart")
+)
+
+```
+
+## Our new prediction
+
+
+
+```{r }
+
+model_preds <- predict(model_list, newdata = tst, na.action = na.pass)
+
+model_preds <- as.data.frame(model_preds)
+
+```
+
+
+
+
+Here we reassign a unified prediction in which we chose to randomly choose between rpart and c5.0 when they disagree.
+
+```{r }
+
+set.seed(1)
+model_preds$p1 <- model_preds$rpart
+model_preds$p1 <- ifelse(model_preds$C5.0!=model_preds$rpart,sample(c('0','1'),418,replace=TRUE),as.numeric(model_preds$p1)-1)
+
+model_preds$p1 <- as.factor(model_preds$p1)
+
+```
+
+
+observe a summary
+
+```{r }
+
+summary(model_preds)
+
+```
+
+## Prediction using our trained model, we got a score of 0.77033
+
+
+
+```{r }
+
+my_solution5 <- data.frame(PassengerId = ids,  Survived = model_preds$p1)
+
+write.csv(my_solution5,file="Titanic/tryP.csv",row.names = F)
+
+```
